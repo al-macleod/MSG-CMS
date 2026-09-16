@@ -1,163 +1,20 @@
-import json
-import os
-import sqlite3
 import sys
-import urllib.error
-import urllib.request
-from datetime import datetime
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSplitter,
-    QStackedWidget, QTabWidget, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget, QHeaderView, QSplashScreen, QDateEdit, QGroupBox
+    QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QMainWindow, QPlainTextEdit, QPushButton, QSplitter, QStackedWidget,
+    QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView, QSplashScreen,
+    QGroupBox
 )
 
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "school_cms_data.db")
 CATEGORIES = ["Lecture Note", "Assignment / Lab", "Exam Prep", "Reference Material", "Project Draft"]
 
 
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def init_db(conn=None):
-    owns = conn is None
-    conn = conn or sqlite3.connect(DB_FILE, timeout=10)
-    cur = conn.cursor()
-    cur.execute("PRAGMA foreign_keys = ON")
-    cur.execute("PRAGMA journal_mode = WAL")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS courses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, title TEXT NOT NULL,
-            category TEXT NOT NULL, content TEXT, tags TEXT, editor_mode TEXT DEFAULT 'rich',
-            updated_at TEXT, created_at TEXT, FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS profile (
-            id INTEGER PRIMARY KEY CHECK (id = 1), first_name TEXT, dob TEXT, email TEXT,
-            gender TEXT, hobbies TEXT, employment TEXT, goals TEXT, mental_health TEXT,
-            ai_name TEXT, system_prompt TEXT, persona TEXT, memory_enabled INTEGER DEFAULT 1,
-            ollama_url TEXT DEFAULT 'http://127.0.0.1:11434', ollama_model TEXT DEFAULT 'llama3.2',
-            onboarding_complete INTEGER DEFAULT 0
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    # Safe, idempotent migration for databases created by earlier versions.
-    for column, definition in [("editor_mode", "TEXT DEFAULT 'rich'"), ("created_at", "TEXT")]:
-        try:
-            cur.execute(f"ALTER TABLE notes ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError:
-            pass
-    cur.execute("SELECT COUNT(*) FROM courses")
-    if cur.fetchone()[0] == 0:
-        cur.executemany("INSERT INTO courses (code, name) VALUES (?, ?)", [
-            ("GENERAL", "General & Miscellaneous"), ("TERM-1", "Term 1 Materials"), ("TERM-2", "Term 2 Materials")
-        ])
-    cur.execute("INSERT OR IGNORE INTO profile (id, system_prompt, persona) VALUES (1, ?, ?)",
-                ("You are a helpful, privacy-conscious academic copilot. Be concise, honest, and safe.",
-                 "A calm, practical study partner"))
-    conn.commit()
-    if owns:
-        conn.close()
-
-
-class DatabaseWorker(QObject):
-    request = pyqtSignal(str, object)
-    result = pyqtSignal(str, object)
-    error = pyqtSignal(str, str)
-
-    def __init__(self):
-        super().__init__()
-        self.conn = None
-
-    @pyqtSlot(str, object)
-    def execute(self, operation, payload):
-        try:
-            if operation == "initialize":
-                self.conn = sqlite3.connect(DB_FILE, timeout=10)
-                init_db(self.conn)
-                self.result.emit(operation, None)
-                return
-            cur = self.conn.cursor()
-            if operation == "profile":
-                cur.execute("SELECT first_name,dob,email,gender,hobbies,employment,goals,mental_health,ai_name,system_prompt,persona,memory_enabled,ollama_url,ollama_model,onboarding_complete FROM profile WHERE id=1")
-                self.result.emit(operation, cur.fetchone())
-            elif operation == "save_profile":
-                fields = payload
-                cur.execute("""UPDATE profile SET first_name=?,dob=?,email=?,gender=?,hobbies=?,employment=?,goals=?,
-                    mental_health=?,ai_name=?,system_prompt=?,persona=?,memory_enabled=?,ollama_url=?,ollama_model=?,
-                    onboarding_complete=1 WHERE id=1""", fields)
-                self.conn.commit(); self.result.emit(operation, None)
-            elif operation == "courses":
-                cur.execute("SELECT id,code,name FROM courses ORDER BY code"); self.result.emit(operation, cur.fetchall())
-            elif operation == "tree":
-                q = (payload or "").lower().strip()
-                like = f"%{q}%"
-                cur.execute("""SELECT n.id,n.title,n.category,n.updated_at,c.code FROM notes n
-                    LEFT JOIN courses c ON c.id=n.course_id WHERE ?='' OR lower(n.title||' '||coalesce(n.content,'')||' '||coalesce(n.tags,'')) LIKE ?
-                    ORDER BY n.updated_at DESC""", (q, like))
-                self.result.emit(operation, cur.fetchall())
-            elif operation == "note":
-                cur.execute("""SELECT n.id,n.course_id,n.title,n.category,n.content,n.tags,n.editor_mode,n.updated_at,
-                    coalesce(c.code,'') FROM notes n LEFT JOIN courses c ON c.id=n.course_id WHERE n.id=?""", (payload,))
-                self.result.emit(operation, cur.fetchone())
-            elif operation == "save_note":
-                note_id, course_id, title, category, content, tags, mode = payload
-                timestamp = now()
-                if note_id:
-                    cur.execute("UPDATE notes SET course_id=?,title=?,category=?,content=?,tags=?,editor_mode=?,updated_at=? WHERE id=?",
-                                (course_id,title,category,content,tags,mode,timestamp,note_id))
-                else:
-                    cur.execute("INSERT INTO notes(course_id,title,category,content,tags,editor_mode,updated_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                                (course_id,title,category,content,tags,mode,timestamp,timestamp)); note_id = cur.lastrowid
-                self.conn.commit(); self.result.emit(operation, (note_id,timestamp))
-            elif operation == "delete_note":
-                cur.execute("DELETE FROM notes WHERE id=?", (payload,)); self.conn.commit(); self.result.emit(operation, None)
-            elif operation == "analytics":
-                cur.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(content)),0), COUNT(DISTINCT course_id) FROM notes")
-                totals = cur.fetchone()
-                cur.execute("SELECT category,COUNT(*) FROM notes GROUP BY category ORDER BY COUNT(*) DESC")
-                categories = cur.fetchall()
-                cur.execute("SELECT substr(updated_at,1,10),COUNT(*) FROM notes WHERE updated_at IS NOT NULL GROUP BY substr(updated_at,1,10) ORDER BY substr(updated_at,1,10) DESC LIMIT 7")
-                self.result.emit(operation, (totals,categories,cur.fetchall()))
-            elif operation == "chat_history":
-                cur.execute("SELECT role,content,created_at FROM chat_messages ORDER BY id"); self.result.emit(operation, cur.fetchall())
-            elif operation == "save_chat":
-                cur.execute("INSERT INTO chat_messages(role,content,created_at) VALUES(?,?,?)", (payload[0],payload[1],now()))
-                self.conn.commit(); self.result.emit(operation, None)
-        except Exception as exc:
-            self.error.emit(operation, str(exc))
-
-
-class OllamaWorker(QObject):
-    finished = pyqtSignal(str, str)
-    failed = pyqtSignal(str)
-
-    def ask(self, url, model, prompt, system):
-        try:
-            body = json.dumps({"model": model, "prompt": prompt, "system": system, "stream": False}).encode()
-            request = urllib.request.Request(url.rstrip("/") + "/api/generate", data=body,
-                                             headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(request, timeout=90) as response:
-                result = json.loads(response.read().decode())
-            self.finished.emit(prompt, result.get("response", "").strip() or "Ollama returned an empty response.")
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            self.failed.emit(f"Could not reach Ollama: {exc}")
+from database import DatabaseWorker, init_db
+from dialogs import AISetupDialog, OnboardingDialog
+from ollama_client import OllamaClient
 
 
 STYLE = """
@@ -181,89 +38,58 @@ QTabWidget::pane{border:1px solid #334155;border-radius:8px} QTabBar::tab{paddin
 """
 
 
-class OnboardingDialog(QDialog):
-    completed = pyqtSignal(object)
-
-    def __init__(self, profile, parent=None):
-        super().__init__(parent); self.setWindowTitle("Welcome - personalize your workspace"); self.resize(620, 600)
-        layout = QVBoxLayout(self)
-        intro = QLabel("Tell us about yourself\nThis information stays in your local database and personalizes your AI workspace.")
-        intro.setObjectName("Section"); layout.addWidget(intro)
-        form = QFormLayout()
-        self.first = QLineEdit(); self.dob = QDateEdit(); self.dob.setCalendarPopup(True); self.dob.setDisplayFormat("yyyy-MM-dd")
-        self.email = QLineEdit(); self.gender = QComboBox(); self.gender.addItems(["Prefer not to say","Woman","Man","Non-binary","Other"])
-        self.hobbies = QLineEdit(); self.employment = QLineEdit(); self.goals = QTextEdit(); self.mental = QTextEdit()
-        for label, widget in [("First name",self.first),("Date of birth",self.dob),("Email",self.email),("Gender",self.gender),("Hobbies",self.hobbies),("Employment",self.employment),("Goals",self.goals),("Mental health context (optional)",self.mental)]:
-            form.addRow(label, widget)
-        layout.addLayout(form)
-        privacy = QLabel("Mental-health context is optional. Do not enter crisis details or sensitive information you do not want stored locally.")
-        privacy.setWordWrap(True); privacy.setStyleSheet("color:#94a3b8"); layout.addWidget(privacy)
-        save = QPushButton("Continue to AI setup"); save.setObjectName("Primary"); save.clicked.connect(self.submit); layout.addWidget(save)
-        if profile and profile[0]: self.first.setText(profile[0])
-
-    def submit(self):
-        if not self.first.text().strip() or not self.email.text().strip():
-            QMessageBox.warning(self,"Missing information","Please provide your first name and email address."); return
-        data = {"first_name":self.first.text().strip(),"dob":self.dob.date().toString("yyyy-MM-dd"),"email":self.email.text().strip(),
-                "gender":self.gender.currentText(),"hobbies":self.hobbies.text().strip(),"employment":self.employment.text().strip(),
-                "goals":self.goals.toPlainText().strip(),"mental_health":self.mental.toPlainText().strip()}
-        self.completed.emit(data); self.accept()
-
-
-class AISetupDialog(QDialog):
-    completed = pyqtSignal(object)
-
-    def __init__(self, profile, parent=None):
-        super().__init__(parent); self.setWindowTitle("Configure your AI copilot"); self.resize(620, 520)
-        p = profile or (None,)*15; layout = QVBoxLayout(self)
-        title = QLabel("Shape your copilot"); title.setObjectName("Section"); layout.addWidget(title)
-        form = QFormLayout()
-        self.name=QLineEdit(p[8] or "Atlas"); self.url=QLineEdit(p[12] or "http://127.0.0.1:11434"); self.model=QLineEdit(p[13] or "llama3.2")
-        self.persona=QLineEdit(p[10] or "A calm, practical study partner"); self.prompt=QTextEdit(p[9] or "You are a helpful, privacy-conscious academic copilot.")
-        self.memory=QCheckBox("Enable long-term memory"); self.memory.setChecked(bool(p[11] if p[11] is not None else 1))
-        for label,w in [("Assistant name",self.name),("Ollama URL",self.url),("Model",self.model),("Persona",self.persona),("System prompt",self.prompt)]: form.addRow(label,w)
-        layout.addLayout(form); layout.addWidget(self.memory)
-        hint=QLabel("Ollama is optional. Install it separately, pull a model, then use Settings to change these values. The copilot will not assist with malware, weapons, or harming people.")
-        hint.setWordWrap(True); hint.setStyleSheet("color:#94a3b8"); layout.addWidget(hint)
-        save=QPushButton("Save AI configuration"); save.setObjectName("Primary"); save.clicked.connect(self.submit); layout.addWidget(save)
-
-    def submit(self):
-        self.completed.emit({"ai_name":self.name.text().strip() or "Atlas","ollama_url":self.url.text().strip(),
-                             "ollama_model":self.model.text().strip(),"persona":self.persona.text().strip(),
-                             "system_prompt":self.prompt.toPlainText().strip(),"memory_enabled":int(self.memory.isChecked())}); self.accept()
-
-
 class ChatPanel(QWidget):
     def __init__(self, db, parent=None):
-        super().__init__(parent); self.db=db; self.profile=None; self.thread=None
-        layout=QVBoxLayout(self); self.history=QTextEdit(); self.history.setReadOnly(True); layout.addWidget(self.history)
-        row=QHBoxLayout(); self.input=QLineEdit(); self.input.setPlaceholderText("Ask your copilot about your notes..."); self.input.returnPressed.connect(self.send)
-        send=QPushButton("Send"); send.setObjectName("Primary"); send.clicked.connect(self.send); row.addWidget(self.input); row.addWidget(send); layout.addLayout(row)
+        super().__init__(parent)
+        self.db = db
+        self.profile = None
+        self.ollama = OllamaClient(self)
+        self.ollama.response.connect(self.reply)
+        self.ollama.error.connect(self.failure)
+        layout = QVBoxLayout(self)
+        self.history = QTextEdit()
+        self.history.setReadOnly(True)
+        layout.addWidget(self.history)
+        row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Ask your copilot about your notes...")
+        self.input.returnPressed.connect(self.send)
+        send = QPushButton("Send")
+        send.setObjectName("Primary")
+        send.clicked.connect(self.send)
+        row.addWidget(self.input)
+        row.addWidget(send)
+        layout.addLayout(row)
         self.db.result.connect(self.handle_db)
 
-    def set_profile(self, profile): self.profile=profile
-    def load(self): self.db.request.emit("chat_history",None)
+    def set_profile(self, profile):
+        self.profile = profile
 
-    @pyqtSlot(str,object)
-    def handle_db(self, op, data):
-        if op=="chat_history":
+    def load(self):
+        self.db.request.emit("chat_history", None)
+
+    @pyqtSlot(str, object)
+    def handle_db(self, operation, data):
+        if operation == "chat_history":
             self.history.clear()
-            for role,content,_ in data: self.history.append(f"<b>{'You' if role=='user' else 'Copilot'}:</b> {content}")
-        elif op=="save_chat": pass
+            for role, content, _ in data:
+                self.history.append(f"<b>{'You' if role == 'user' else 'Copilot'}:</b> {content}")
 
     def send(self):
-        prompt=self.input.text().strip()
-        if not prompt or not self.profile: return
-        self.input.clear(); self.history.append(f"<b>You:</b> {prompt}"); self.db.request.emit("save_chat",("user",prompt))
-        system=self.profile[9] or "You are a helpful academic copilot."
-        if self.profile[10]: system += f"\nPersona: {self.profile[10]}"
-        self.thread=QThread(); worker=OllamaWorker(); worker.moveToThread(self.thread)
-        self.thread.started.connect(lambda: worker.ask(self.profile[12],self.profile[13],prompt,system))
-        worker.finished.connect(self.reply); worker.failed.connect(self.failure); worker.finished.connect(self.thread.quit); worker.failed.connect(self.thread.quit)
-        self.thread.start()
+        prompt = self.input.text().strip()
+        if not prompt or not self.profile:
+            return
+        self.input.clear()
+        self.history.append(f"<b>You:</b> {prompt}")
+        self.db.request.emit("save_chat", ("user", prompt))
+        self.ollama.ask(self.profile[12], self.profile[13], prompt, self.profile[9], self.profile[10])
 
-    def reply(self, _, text): self.history.append(f"<b>Copilot:</b> {text}"); self.db.request.emit("save_chat",("assistant",text))
-    def failure(self, message): self.history.append(f"<b>Copilot:</b> <span style='color:#fca5a5'>{message}</span>")
+    def reply(self, _, text):
+        self.history.append(f"<b>Copilot:</b> {text}")
+        self.db.request.emit("save_chat", ("assistant", text))
+
+    def failure(self, message):
+        self.history.append(f"<b>Copilot:</b> <span style='color:#fca5a5'>{message}</span>")
 
 
 class MainWindow(QMainWindow):
