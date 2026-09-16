@@ -1,6 +1,6 @@
 import sys
 
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import QThread, pyqtSlot
 from PyQt6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
