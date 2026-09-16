@@ -26,3 +26,12 @@ The app stores data in a local SQLite file named `school_cms_data.db` in the pro
 Install Ollama separately, start its local service, and pull a model such as `llama3.2`.
 The default endpoint is `http://127.0.0.1:11434`. If Ollama is unavailable, notes and analytics
 remain fully usable and the chat screen reports the connection error.
+
+## Module layout
+- `main.py` owns the application shell, note editor, analytics view, and navigation.
+- `database.py` owns SQLite schema initialization and background persistence operations.
+- `ollama_client.py` owns Ollama HTTP transport, prompt construction, and async lifecycle.
+- `dialogs.py` owns first-run profile and AI configuration dialogs.
+
+This separation keeps provider-specific AI changes out of the application shell and makes it
+possible to add another model provider without rewriting note management or onboarding.
