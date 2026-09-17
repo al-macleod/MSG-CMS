@@ -31,6 +31,7 @@ class OllamaWorker(QObject):
 
     finished = pyqtSignal(str, str)
     failed = pyqtSignal(str)
+    models_loaded = pyqtSignal(object)
 
     def ask(self, url, model, prompt, system):
         try:
@@ -53,26 +54,46 @@ class OllamaWorker(QObject):
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
             self.failed.emit(f"Could not reach Ollama: {exc}")
 
+    def list_models(self, url):
+        try:
+            request = urllib.request.Request(
+                (url or DEFAULT_OLLAMA_URL).rstrip("/") + "/api/tags",
+                headers={"Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.loads(response.read().decode())
+            self.models_loaded.emit([item.get("name", "") for item in result.get("models", []) if item.get("name")])
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            self.failed.emit(f"Could not load Ollama models: {exc}")
+
 
 class OllamaClient(QObject):
     """Small async facade used by the chat UI."""
 
     response = pyqtSignal(str, str)
     error = pyqtSignal(str)
+    models = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.thread = None
 
     def ask(self, url, model, prompt, system_prompt, persona=""):
+        self._run(lambda worker: worker.ask(
+            url, model, prompt, build_system_prompt(system_prompt, persona)
+        ))
+
+    def list_models(self, url):
+        self._run(lambda worker: worker.list_models(url))
+
+    def _run(self, action):
         self.thread = QThread()
         worker = OllamaWorker()
         worker.moveToThread(self.thread)
-        self.thread.started.connect(
-            lambda: worker.ask(url, model, prompt, build_system_prompt(system_prompt, persona))
-        )
+        self.thread.started.connect(lambda: action(worker))
         worker.finished.connect(self.response)
         worker.failed.connect(self.error)
+        worker.models_loaded.connect(self.models)
         worker.finished.connect(self.thread.quit)
         worker.failed.connect(self.thread.quit)
         self.thread.finished.connect(worker.deleteLater)
