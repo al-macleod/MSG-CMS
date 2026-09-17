@@ -13,7 +13,7 @@ CATEGORIES = ["Lecture Note", "Assignment / Lab", "Exam Prep", "Reference Materi
 
 
 from database import DatabaseWorker, init_db
-from dialogs import AISetupDialog, OnboardingDialog
+from dialogs import AIConfigurationPage, AISetupDialog, OnboardingDialog, SettingsDialog
 from ollama_client import OllamaClient
 
 
@@ -105,10 +105,10 @@ class MainWindow(QMainWindow):
         self.profile_label=QLabel("Workspace"); h.addWidget(self.profile_label); outer.addWidget(header)
         body=QHBoxLayout(); sidebar=QFrame(); sidebar.setObjectName("Sidebar"); side=QVBoxLayout(sidebar); side.setContentsMargins(10,16,10,10)
         self.nav_buttons=[]
-        for text,idx in [("Notes",0),("Analytics",1),("AI Copilot",2),("Settings",3)]:
+        for text,idx in [("Notes",0),("Analytics",1),("AI Copilot",2),("AI configuration",3),("Settings",4)]:
             b=QPushButton(text); b.setObjectName("Nav"); b.setCheckable(True); b.clicked.connect(lambda _,i=idx:self.pages.setCurrentIndex(i)); side.addWidget(b); self.nav_buttons.append(b)
         side.addStretch(); self.quick=QPushButton("Open chat popup"); self.quick.clicked.connect(self.open_chat); side.addWidget(self.quick); body.addWidget(sidebar)
-        self.pages=QStackedWidget(); self.pages.addWidget(self.notes_page()); self.pages.addWidget(self.analytics_page()); self.pages.addWidget(self.chat_page()); self.pages.addWidget(self.settings_page()); body.addWidget(self.pages,1); outer.addLayout(body,1)
+        self.pages=QStackedWidget(); self.pages.addWidget(self.notes_page()); self.pages.addWidget(self.analytics_page()); self.pages.addWidget(self.chat_page()); self.ai_config=AIConfigurationPage(self.profile); self.ai_config.saved.connect(self.save_ai); self.pages.addWidget(self.ai_config); self.pages.addWidget(self.settings_page()); body.addWidget(self.pages,1); outer.addLayout(body,1)
         footer=QFrame(); footer.setObjectName("Footer"); fl=QHBoxLayout(footer); self.status=QLabel("Ready"); fl.addWidget(self.status); fl.addStretch(); fl.addWidget(QLabel("Local-first workspace")); outer.addWidget(footer); self.nav_buttons[0].setChecked(True)
 
     def notes_page(self):
@@ -132,8 +132,8 @@ class MainWindow(QMainWindow):
 
     def settings_page(self):
         page=QWidget(); layout=QVBoxLayout(page); title=QLabel("Settings"); title.setObjectName("Section"); layout.addWidget(title)
-        button=QPushButton("Edit profile and AI configuration"); button.setObjectName("Primary"); button.clicked.connect(self.configure); layout.addWidget(button)
-        info=QLabel("Your profile, AI configuration, and conversation memory are stored locally in SQLite. Ollama must be installed and running separately."); info.setWordWrap(True); info.setStyleSheet("color:#94a3b8"); layout.addWidget(info); layout.addStretch(); return page
+        button=QPushButton("Open full-screen settings"); button.setObjectName("Primary"); button.clicked.connect(self.configure); layout.addWidget(button)
+        info=QLabel("Use the full-screen workspace to edit your profile, configure AI, review privacy controls, and prepare appearance preferences."); info.setWordWrap(True); info.setStyleSheet("color:#94a3b8"); layout.addWidget(info); layout.addStretch(); return page
 
     def toggle_editor(self):
         is_code=self.mode.currentIndex()==1; self.rich.setVisible(not is_code); self.code.setVisible(is_code)
@@ -158,16 +158,27 @@ class MainWindow(QMainWindow):
         dialog=QDialog(self); dialog.setWindowTitle("Copilot chat"); dialog.resize(620,600); lay=QVBoxLayout(dialog); panel=ChatPanel(self.db); panel.set_profile(self.profile); lay.addWidget(panel); panel.load(); dialog.exec()
 
     def configure(self):
-        dialog=AISetupDialog(self.profile,self); dialog.completed.connect(self.save_ai); dialog.exec()
+        dialog=SettingsDialog(self.profile,self)
+        dialog.profile_saved.connect(self.save_profile)
+        dialog.ai_saved.connect(self.save_ai)
+        dialog.exec()
 
     def save_ai(self, data):
-        p=list(self.profile); p[8]=data["ai_name"]; p[9]=data["system_prompt"]; p[10]=data["persona"]; p[11]=data["memory_enabled"]; p[12]=data["ollama_url"]; p[13]=data["ollama_model"]; self.profile=tuple(p); self.chat.set_profile(self.profile); self.db.request.emit("save_profile",tuple(p[:8]+p[8:14]))
+        p=list(self.profile); p[8]=data["ai_name"]; p[9]=data["system_prompt"]; p[10]=data["persona"]; p[11]=data["memory_enabled"]; p[12]=data["ollama_url"]; p[13]=data["ollama_model"]; self.profile=tuple(p); self.chat.set_profile(self.profile); self.ai_config = getattr(self, "ai_config", None); self.db.request.emit("save_profile",tuple(p[:8]+p[8:14]))
+
+    def save_profile(self, data):
+        p=list(self.profile)
+        for index, key in [(0, "first_name"), (2, "email"), (3, "gender"), (4, "hobbies"), (5, "employment"), (6, "goals")]:
+            p[index]=data[key]
+        self.profile=tuple(p)
+        self.profile_label.setText(f"Welcome, {p[0] or 'there'}")
+        self.db.request.emit("save_profile",tuple(p[:8]+p[8:14]))
 
     @pyqtSlot(str,object)
     def handle(self,op,data):
         if op=="initialize": self.db.request.emit("profile",None); self.db.request.emit("tree",""); self.db.request.emit("analytics",None)
         elif op=="profile":
-            self.profile=data; self.profile_label.setText(f"Welcome, {data[0] or 'there'}"); self.chat.set_profile(data)
+            self.profile=data; self.profile_label.setText(f"Welcome, {data[0] or 'there'}"); self.chat.set_profile(data); self.ai_config.set_profile(data)
             if not data[14]:
                 dialog=OnboardingDialog(data,self); dialog.completed.connect(self.save_onboarding); dialog.exec()
             else: self.chat.load()
@@ -194,7 +205,7 @@ class MainWindow(QMainWindow):
             self.activity.clear(); [self.activity.addItem(f"{day}: {count} note update(s)") for day,count in activity]
 
     def save_onboarding(self,data):
-        p=list(self.profile); p[:8]=[data[k] for k in ["first_name","dob","email","gender","hobbies","employment","goals","mental_health"]]; self.profile=tuple(p); self.configure(); self.db.request.emit("save_profile",tuple(p[:8]+p[8:14]))
+        p=list(self.profile); p[:8]=[data[k] for k in ["first_name","dob","email","gender","hobbies","employment","goals","mental_health"]]; self.profile=tuple(p); self.ai_config.set_profile(self.profile); self.configure(); self.db.request.emit("save_profile",tuple(p[:8]+p[8:14]))
 
 
 def main():
