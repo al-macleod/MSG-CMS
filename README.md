@@ -5,6 +5,7 @@ A local-first academic workspace for organizing notes, understanding usage patte
 - Full note history with open, edit, search, and delete workflows
 - Rich text and code editor modes, switchable per note
 - Analytics dashboard for note volume, content size, courses, categories, and activity
+- Advanced productivity analytics for task completion, open work, resources, favorites, and course activity
 - First-run profile onboarding and AI copilot configuration
 - Dedicated copilot screen plus a chat popup available from every screen
 - Optional Ollama integration with configurable URL, model, system prompt, persona, and memory
@@ -14,6 +15,9 @@ A local-first academic workspace for organizing notes, understanding usage patte
 - Persistent task tracking with due dates, priorities, completion toggles, and course assignment
 - Persistent resource library for URLs, descriptions, tags, and course assignment
 - Favorites, archive state, duplicate notes, and note version history
+- Smart Notes actions for summaries, key points, study questions, and action-item extraction through Ollama
+- Local document attachments on notes with metadata, open, and remove workflows
+- Course workspace shortcuts that filter the notes library to a selected course
 - Workspace JSON export/import and SQLite backup
 - Dashboard, course library, analytics, reminders-ready task data, and richer navigation
 - Keyboard shortcuts: Ctrl+S to save and Ctrl+N to create a new note
