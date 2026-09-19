@@ -3,7 +3,7 @@ import os
 import shutil
 import sys
 
-from PyQt6.QtCore import QThread, Qt, QUrl, pyqtSlot
+from PyQt6.QtCore import QThread, QTimer, Qt, QUrl, pyqtSlot
 from PyQt6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
     def __init__(self, db):
         super().__init__(); self.db=db; self.profile=None; self.note_id=None; self.setWindowTitle("MSG Academic Workspace"); self.resize(1400,900); self.build()
         self.smart_ai=OllamaClient(self); self.smart_ai.response.connect(self.show_smart_result); self.smart_ai.error.connect(self.show_smart_error)
-        db.result.connect(self.handle); db.error.connect(lambda op,msg: QMessageBox.critical(self,"Database error",msg))
+        db.result.connect(self.handle); db.error.connect(self.database_error)
         QShortcut(QKeySequence("Ctrl+S"),self,activated=self.save_note); QShortcut(QKeySequence("Ctrl+N"),self,activated=self.new_note)
 
     def build(self):
@@ -133,11 +133,11 @@ class MainWindow(QMainWindow):
         self.profile_label=QLabel("Workspace"); h.addWidget(self.profile_label); outer.addWidget(header)
         body=QVBoxLayout(); navbar=QFrame(); navbar.setObjectName("NavBar"); nav_layout=QHBoxLayout(navbar); nav_layout.setContentsMargins(18,0,18,0)
         self.nav_buttons=[]
-        for text,idx in [("Dashboard",0),("Courses",1),("Notes",2),("Tasks",3),("Resources",4),("AI",6),("Settings",5)]:
-            b=QPushButton(text); b.setObjectName("Nav"); b.setCheckable(True); b.clicked.connect(lambda _,i=idx:self.pages.setCurrentIndex(i)); nav_layout.addWidget(b); self.nav_buttons.append(b)
+        for text,idx in [("Dashboard",0),("Courses",1),("Notes",2),("Tasks",3),("Resources",4),("Analytics",5),("Settings",6),("AI",7)]:
+            b=QPushButton(text); b.setObjectName("Nav"); b.setCheckable(True); b.clicked.connect(lambda _,i=idx:self.navigate(i)); nav_layout.addWidget(b); self.nav_buttons.append(b)
         nav_layout.addStretch()
         self.quick=action_button("+ Quick Add", True); self.quick.clicked.connect(self.open_quick_add); nav_layout.addWidget(self.quick)
-        chat_button=action_button("Copilot"); chat_button.clicked.connect(lambda:self.pages.setCurrentIndex(7)); nav_layout.addWidget(chat_button)
+        chat_button=action_button("Copilot"); chat_button.clicked.connect(lambda:self.pages.setCurrentIndex(8)); nav_layout.addWidget(chat_button)
         body.addWidget(navbar)
         self.pages=QStackedWidget()
         self.pages.addWidget(self.dashboard_page())
@@ -145,11 +145,28 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.notes_page())
         self.pages.addWidget(self.tasks_page())
         self.pages.addWidget(self.resources_page())
+        self.pages.addWidget(self.analytics_page())
         self.pages.addWidget(self.settings_page())
         self.pages.addWidget(self.ai_configuration_page())
         self.pages.addWidget(self.chat_page())
+        self.pages.currentChanged.connect(self.update_navigation)
         body.addWidget(self.pages,1); outer.addLayout(body,1)
         footer=QFrame(); footer.setObjectName("Footer"); fl=QHBoxLayout(footer); self.status=QLabel("Ready"); fl.addWidget(self.status); fl.addStretch(); fl.addWidget(QLabel("Local-first workspace")); outer.addWidget(footer); self.nav_buttons[0].setChecked(True)
+
+    def navigate(self, index):
+        self.pages.setCurrentIndex(index)
+        self.status.setText(f"{self.nav_buttons[index].text()} workspace ready")
+
+    def update_navigation(self, index):
+        for button in self.nav_buttons:
+            button.setChecked(False)
+        if 0 <= index < len(self.nav_buttons):
+            self.nav_buttons[index].setChecked(True)
+
+    def database_error(self, operation, message):
+        self.status.setText(f"Could not complete {operation}: {message}")
+        self.status.setStyleSheet("color:#fca5a5;font-weight:700;")
+        QTimer.singleShot(7000, lambda: self.status.setStyleSheet(""))
 
     def dashboard_page(self):
         page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24)
@@ -249,7 +266,7 @@ class MainWindow(QMainWindow):
         self.note_id=item.data(0,Qt.ItemDataRole.UserRole); self.db.request.emit("note",self.note_id); self.db.request.emit("attachments",self.note_id)
 
     def new_note(self):
-        self.note_id=None; self.title.clear(); self.tags.clear(); self.rich.clear(); self.code.clear(); self.status.setText("New note draft")
+        self.note_id=None; self.title.clear(); self.tags.clear(); self.rich.clear(); self.code.clear(); self.attachments_list.clear(); self.status.setText("New note draft")
 
     def save_note(self):
         if not self.title.text().strip() or self.course.currentData() is None:
@@ -278,10 +295,12 @@ class MainWindow(QMainWindow):
 
     def show_smart_result(self, _, text):
         self.status.setText("Smart notes ready")
+        self.status.setStyleSheet("color:#86efac;font-weight:700;")
         QMessageBox.information(self, f"Smart {self.smart_action}", text)
 
     def show_smart_error(self, message):
         self.status.setText("Smart notes unavailable")
+        self.status.setStyleSheet("color:#fca5a5;font-weight:700;")
         QMessageBox.warning(self, "Smart notes", message)
 
     def attach_file(self):
@@ -436,10 +455,12 @@ class MainWindow(QMainWindow):
             if op=="delete_note": self.new_note()
         elif op=="analytics":
             totals,categories,activity,open_tasks,completed_tasks,resources,favorites=data
-            while self.metrics.count(): self.metrics.takeAt(0).widget().deleteLater()
+            while self.metrics.count():
+                item=self.metrics.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
             labels=[("Total notes",totals[0]),("Words / chars",totals[1]),("Courses used",totals[2])]
             for col,(label,value) in enumerate(labels):
-                box=QGroupBox(label); lay=QVBoxLayout(box); metric=QLabel(str(value)); metric.setObjectName("Metric"); lay.addWidget(metric); self.metrics.addWidget(box,0,col)
+                box=QGroupBox(label); lay=QVBoxLayout(box); value_label=QLabel(str(value)); value_label.setObjectName("MetricValue"); lay.addWidget(value_label); self.metrics.addWidget(box,0,col)
             if hasattr(self, "dashboard_metrics"):
                 dashboard_values=[totals[2], totals[0], totals[1], len(activity)]
                 for index,value in enumerate(dashboard_values):
