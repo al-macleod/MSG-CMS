@@ -11,6 +11,11 @@ A local-first academic workspace for organizing notes, understanding usage patte
 - Dashboard-first navigation inspired by the MSGGroup academic CMS concept
 - Quick Add modal with live note preview and course assignment
 - Reusable card, metric, pill, and page-header UI primitives
+- Persistent task tracking with due dates, priorities, completion toggles, and course assignment
+- Persistent resource library for URLs, descriptions, tags, and course assignment
+- Favorites, archive state, duplicate notes, and note version history
+- Workspace JSON export/import and SQLite backup
+- Dashboard, course library, analytics, reminders-ready task data, and richer navigation
 - Keyboard shortcuts: Ctrl+S to save and Ctrl+N to create a new note
 
 Profile and conversation data stay in the local SQLite database. Mental-health context is optional.

@@ -106,19 +106,88 @@ class QuickAddDialog(QDialog):
         self.findChild(QPushButton, "PrimaryButton").setText("Save note" if enabled else "Coming soon")
 
     def submit(self):
-        if self.mode.currentIndex() != 0:
-            QMessageBox.information(self, "Coming soon", "Tasks and resources are planned for a future persistence update.")
-            return
         if not self.title.text().strip() or self.course.currentData() is None:
             QMessageBox.warning(self, "Validation", "Choose a title and course.")
             return
+        if self.mode.currentIndex() == 1:
+            self.note_created.emit({
+                "kind": "task", "course_id": self.course.currentData(), "title": self.title.text().strip(),
+                "description": self.content.toPlainText().strip(), "priority": "Medium",
+            })
+            self.accept()
+            return
+        if self.mode.currentIndex() == 2:
+            self.note_created.emit({
+                "kind": "resource", "course_id": self.course.currentData(), "title": self.title.text().strip(),
+                "description": self.content.toPlainText().strip(), "tags": self.tags.text().strip(),
+            })
+            self.accept()
+            return
         self.note_created.emit({
+            "kind": "note",
             "course_id": self.course.currentData(),
             "title": self.title.text().strip(),
             "category": self.category.currentText(),
             "tags": self.tags.text().strip(),
             "content": self.content.toPlainText().strip(),
         })
+        self.accept()
+
+
+class TaskDialog(QDialog):
+    saved = pyqtSignal(object)
+
+    def __init__(self, courses, task=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Task")
+        self.resize(520, 420)
+        values = task or (None, "", "", "", "Medium", "Open", "")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.title = QLineEdit(values[1])
+        self.description = QTextEdit(values[2] or "")
+        self.due = QDateEdit()
+        self.due.setCalendarPopup(True)
+        self.due.setDisplayFormat("yyyy-MM-dd")
+        self.priority = QComboBox(); self.priority.addItems(["Low", "Medium", "High", "Urgent"]); self.priority.setCurrentText(values[4] or "Medium")
+        self.course = QComboBox()
+        for cid, code, name in courses: self.course.addItem(f"[{code}] {name}", cid)
+        self.course.setCurrentIndex(max(0, self.course.findData(values[0])))
+        form.addRow("Title", self.title); form.addRow("Course", self.course); form.addRow("Due date", self.due)
+        form.addRow("Priority", self.priority); form.addRow("Description", self.description)
+        layout.addLayout(form)
+        save = QPushButton("Save task"); save.setObjectName("PrimaryButton"); save.clicked.connect(self.submit); layout.addWidget(save)
+
+    def submit(self):
+        if not self.title.text().strip() or self.course.currentData() is None:
+            QMessageBox.warning(self, "Validation", "Choose a title and course."); return
+        self.saved.emit((None, self.course.currentData(), self.title.text().strip(), self.description.toPlainText().strip(),
+                         self.due.date().toString("yyyy-MM-dd"), self.priority.currentText(), "Open"))
+        self.accept()
+
+
+class ResourceDialog(QDialog):
+    saved = pyqtSignal(object)
+
+    def __init__(self, courses, resource=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Resource")
+        self.resize(520, 380)
+        values = resource or (None, "", "", "", "", "")
+        layout = QVBoxLayout(self); form = QFormLayout()
+        self.title = QLineEdit(values[1]); self.url = QLineEdit(values[2] or ""); self.description = QTextEdit(values[3] or "")
+        self.tags = QLineEdit(values[4] or ""); self.course = QComboBox()
+        for cid, code, name in courses: self.course.addItem(f"[{code}] {name}", cid)
+        self.course.setCurrentIndex(max(0, self.course.findData(values[0])))
+        form.addRow("Title", self.title); form.addRow("Course", self.course); form.addRow("URL", self.url)
+        form.addRow("Description", self.description); form.addRow("Tags", self.tags); layout.addLayout(form)
+        save = QPushButton("Save resource"); save.setObjectName("PrimaryButton"); save.clicked.connect(self.submit); layout.addWidget(save)
+
+    def submit(self):
+        if not self.title.text().strip() or self.course.currentData() is None:
+            QMessageBox.warning(self, "Validation", "Choose a title and course."); return
+        self.saved.emit((None, self.course.currentData(), self.title.text().strip(), self.url.text().strip(),
+                         self.description.toPlainText().strip(), self.tags.text().strip()))
         self.accept()
 
 

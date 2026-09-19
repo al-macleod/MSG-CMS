@@ -1,10 +1,10 @@
 import sys
 
-from PyQt6.QtCore import QThread, pyqtSlot
+from PyQt6.QtCore import QThread, Qt, pyqtSlot
 from PyQt6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QMainWindow, QPlainTextEdit, QPushButton, QSplitter, QStackedWidget,
+    QMessageBox, QMainWindow, QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QFileDialog,
     QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView, QSplashScreen,
     QGroupBox
 )
@@ -13,7 +13,7 @@ CATEGORIES = ["Lecture Note", "Assignment / Lab", "Exam Prep", "Reference Materi
 
 
 from database import DatabaseWorker, init_db
-from dialogs import AIConfigurationPage, AISetupDialog, OnboardingDialog, QuickAddDialog, SettingsDialog
+from dialogs import AIConfigurationPage, AISetupDialog, OnboardingDialog, QuickAddDialog, ResourceDialog, SettingsDialog, TaskDialog
 from ollama_client import OllamaClient
 from ui_components import action_button, card, metric_card, page_heading, pill
 
@@ -129,17 +129,18 @@ class MainWindow(QMainWindow):
         self.profile_label=QLabel("Workspace"); h.addWidget(self.profile_label); outer.addWidget(header)
         body=QVBoxLayout(); navbar=QFrame(); navbar.setObjectName("NavBar"); nav_layout=QHBoxLayout(navbar); nav_layout.setContentsMargins(18,0,18,0)
         self.nav_buttons=[]
-        for text,idx in [("Dashboard",0),("Courses",1),("Notes",2),("Tasks",3),("Settings",4)]:
+        for text,idx in [("Dashboard",0),("Courses",1),("Notes",2),("Tasks",3),("Resources",4),("AI",6),("Settings",5)]:
             b=QPushButton(text); b.setObjectName("Nav"); b.setCheckable(True); b.clicked.connect(lambda _,i=idx:self.pages.setCurrentIndex(i)); nav_layout.addWidget(b); self.nav_buttons.append(b)
         nav_layout.addStretch()
         self.quick=action_button("+ Quick Add", True); self.quick.clicked.connect(self.open_quick_add); nav_layout.addWidget(self.quick)
-        chat_button=action_button("Copilot"); chat_button.clicked.connect(lambda:self.pages.setCurrentIndex(6)); nav_layout.addWidget(chat_button)
+        chat_button=action_button("Copilot"); chat_button.clicked.connect(lambda:self.pages.setCurrentIndex(7)); nav_layout.addWidget(chat_button)
         body.addWidget(navbar)
         self.pages=QStackedWidget()
         self.pages.addWidget(self.dashboard_page())
         self.pages.addWidget(self.courses_page())
         self.pages.addWidget(self.notes_page())
         self.pages.addWidget(self.tasks_page())
+        self.pages.addWidget(self.resources_page())
         self.pages.addWidget(self.settings_page())
         self.pages.addWidget(self.ai_configuration_page())
         self.pages.addWidget(self.chat_page())
@@ -175,9 +176,14 @@ class MainWindow(QMainWindow):
     def tasks_page(self):
         page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24)
         layout.addWidget(page_heading("Tasks", "Keep upcoming work visible alongside your notes."))
-        frame,card_layout=card("Task workspace","Task persistence is the next data layer. Quick Add is ready for it.")
-        card_layout.addWidget(pill("Coming soon"))
-        layout.addWidget(frame); layout.addStretch(); return page
+        toolbar=QHBoxLayout(); add=action_button("+ Add task", True); add.clicked.connect(self.add_task); toolbar.addStretch(); toolbar.addWidget(add); layout.addLayout(toolbar)
+        self.tasks_list=QListWidget(); self.tasks_list.itemDoubleClicked.connect(self.toggle_task); layout.addWidget(self.tasks_list); return page
+
+    def resources_page(self):
+        page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24)
+        layout.addWidget(page_heading("Resources","Keep useful links, references, and study material close at hand."))
+        toolbar=QHBoxLayout(); add=action_button("+ Add resource", True); add.clicked.connect(self.add_resource); toolbar.addStretch(); toolbar.addWidget(add); layout.addLayout(toolbar)
+        self.resources_list=QListWidget(); layout.addWidget(self.resources_list); return page
 
     def courses_page(self):
         page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24)
@@ -200,7 +206,10 @@ class MainWindow(QMainWindow):
         self.bold_button=QPushButton("B"); self.bold_button.setToolTip("Bold"); self.bold_button.clicked.connect(lambda: self.rich.setFontWeight(QFont.Weight.Bold))
         italic=QPushButton("I"); italic.setToolTip("Italic"); italic.clicked.connect(lambda: self.rich.setFontItalic(not self.rich.fontItalic()))
         bullet=QPushButton("• List"); bullet.clicked.connect(lambda: self.rich.insertPlainText("\n• "))
-        toolbar.addWidget(self.bold_button); toolbar.addWidget(italic); toolbar.addWidget(bullet); toolbar.addStretch(); el.addLayout(toolbar)
+        favorite=QPushButton("☆ Favorite"); favorite.clicked.connect(self.toggle_favorite)
+        duplicate=QPushButton("Duplicate"); duplicate.clicked.connect(lambda:self.db.request.emit("duplicate_note", self.note_id) if self.note_id else None)
+        archive=QPushButton("Archive"); archive.clicked.connect(lambda:self.db.request.emit("set_note_state", ("archive", True, self.note_id)) if self.note_id else None)
+        toolbar.addWidget(self.bold_button); toolbar.addWidget(italic); toolbar.addWidget(bullet); toolbar.addWidget(favorite); toolbar.addWidget(duplicate); toolbar.addWidget(archive); toolbar.addStretch(); el.addLayout(toolbar)
         self.rich=QTextEdit(); self.code=QPlainTextEdit(); self.code.setFont(QFont("Consolas",10)); el.addWidget(self.rich); el.addWidget(self.code); self.code.hide()
         actions=QHBoxLayout(); save=QPushButton("Save note"); save.setObjectName("Primary"); save.clicked.connect(self.save_note); delete=QPushButton("Delete note"); delete.setObjectName("Danger"); delete.clicked.connect(self.delete_note); actions.addWidget(save); actions.addWidget(delete); actions.addStretch(); el.addLayout(actions); split.addWidget(editor); split.setSizes([500,900]); layout.addWidget(split); self.db.request.emit("courses",None); return page
 
@@ -214,7 +223,12 @@ class MainWindow(QMainWindow):
     def settings_page(self):
         page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24); title=QLabel("Settings"); title.setObjectName("PageTitle"); layout.addWidget(title)
         button=QPushButton("Open full-screen settings"); button.setObjectName("Primary"); button.clicked.connect(self.configure); layout.addWidget(button)
-        info=QLabel("Use the full-screen workspace to edit your profile, configure AI, review privacy controls, and prepare appearance preferences."); info.setWordWrap(True); info.setStyleSheet("color:#94a3b8"); layout.addWidget(info); layout.addStretch(); return page
+        info=QLabel("Use the full-screen workspace to edit your profile, configure AI, review privacy controls, and prepare appearance preferences."); info.setWordWrap(True); info.setStyleSheet("color:#94a3b8"); layout.addWidget(info)
+        data_frame,data_layout=card("Data portability","Move or protect your local workspace.")
+        export=QPushButton("Export workspace JSON"); export.clicked.connect(self.export_data)
+        import_button=QPushButton("Import workspace JSON"); import_button.clicked.connect(self.import_data)
+        backup=QPushButton("Create database backup"); backup.clicked.connect(self.backup_data)
+        data_layout.addWidget(export); data_layout.addWidget(import_button); data_layout.addWidget(backup); layout.addWidget(data_frame); layout.addStretch(); return page
 
     def toggle_editor(self):
         is_code=self.mode.currentIndex()==1; self.rich.setVisible(not is_code); self.code.setVisible(is_code)
@@ -232,6 +246,22 @@ class MainWindow(QMainWindow):
         content=self.code.toPlainText() if self.mode.currentIndex()==1 else self.rich.toHtml()
         self.db.request.emit("save_note",(self.note_id,self.course.currentData(),self.title.text().strip(),self.category.currentText(),content,self.tags.text().strip(),"code" if self.mode.currentIndex() else "rich"))
 
+    def toggle_favorite(self):
+        if self.note_id:
+            self.db.request.emit("set_note_state", ("favorite", True, self.note_id))
+
+    def export_data(self):
+        path,_=QFileDialog.getSaveFileName(self,"Export workspace","","JSON files (*.json)")
+        if path: self.db.request.emit("export_data",path)
+
+    def import_data(self):
+        path,_=QFileDialog.getOpenFileName(self,"Import workspace","","JSON files (*.json)")
+        if path: self.db.request.emit("import_data",path)
+
+    def backup_data(self):
+        path,_=QFileDialog.getSaveFileName(self,"Backup database","","SQLite files (*.db)")
+        if path: self.db.request.emit("backup",path)
+
     def delete_note(self):
         if self.note_id and QMessageBox.question(self,"Delete note","Delete this note permanently?")==QMessageBox.StandardButton.Yes: self.db.request.emit("delete_note",self.note_id)
 
@@ -242,7 +272,27 @@ class MainWindow(QMainWindow):
         self.db.request.emit("courses_for_quick_add", None)
 
     def save_quick_note(self, data):
-        self.db.request.emit("save_note", (None, data["course_id"], data["title"], data["category"], data["content"], data["tags"], "rich"))
+        if data["kind"] == "note":
+            self.db.request.emit("save_note", (None, data["course_id"], data["title"], data["category"], data["content"], data["tags"], "rich"))
+        elif data["kind"] == "task":
+            self.db.request.emit("save_task", (None, data["course_id"], data["title"], data["description"], "", data["priority"], "Open"))
+        else:
+            self.db.request.emit("save_resource", (None, data["course_id"], data["title"], "", data["description"], data["tags"]))
+
+    def add_task(self):
+        dialog=TaskDialog(getattr(self, "quick_add_courses", []), self)
+        dialog.saved.connect(lambda data: self.db.request.emit("save_task", data))
+        dialog.exec()
+
+    def toggle_task(self, item):
+        task_id=item.data(Qt.ItemDataRole.UserRole)
+        completed=item.text().startswith("✓")
+        self.db.request.emit("toggle_task", (task_id, not completed))
+
+    def add_resource(self):
+        dialog=ResourceDialog(getattr(self, "quick_add_courses", []), parent=self)
+        dialog.saved.connect(lambda data: self.db.request.emit("save_resource", data))
+        dialog.exec()
 
     def configure(self):
         dialog=SettingsDialog(self.profile,self)
@@ -263,7 +313,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str,object)
     def handle(self,op,data):
-        if op=="initialize": self.db.request.emit("profile",None); self.db.request.emit("tree",""); self.db.request.emit("analytics",None); self.db.request.emit("courses",None)
+        if op=="initialize": self.db.request.emit("profile",None); self.db.request.emit("tree",""); self.db.request.emit("analytics",None); self.db.request.emit("courses",None); self.db.request.emit("tasks",None); self.db.request.emit("resources",None)
         elif op=="profile":
             self.profile=data; self.profile_label.setText(f"Welcome, {data[0] or 'there'}"); self.chat.set_profile(data); self.ai_config.set_profile(data)
             if not data[14]:
@@ -285,14 +335,25 @@ class MainWindow(QMainWindow):
             dialog=QuickAddDialog(data if data is not None else getattr(self, "quick_add_courses", []), self)
             dialog.note_created.connect(self.save_quick_note)
             dialog.exec()
+        elif op=="tasks":
+            self.tasks_list.clear()
+            for task_id,title,description,due,priority,status,course in data:
+                item=QListWidgetItem(f"{'✓ ' if status == 'Completed' else ''}{title}  •  {course}  •  {due or 'No due date'}  •  {priority}")
+                item.setData(Qt.ItemDataRole.UserRole, task_id); self.tasks_list.addItem(item)
+        elif op=="resources":
+            self.resources_list.clear()
+            for resource_id,title,url,description,tags,course in data:
+                item=QListWidgetItem(f"{title}  •  {course}  •  {url or 'No URL'}")
+                item.setData(Qt.ItemDataRole.UserRole, resource_id); self.resources_list.addItem(item)
         elif op=="tree":
             self.note_list.clear()
             for nid,title,cat,updated,course in data:
                 item=QTreeWidgetItem([title,cat,course or "",updated or ""]); item.setData(0,Qt.ItemDataRole.UserRole,nid); self.note_list.addTopLevelItem(item)
         elif op=="note" and data:
             nid,cid,title,cat,content,tags,mode,updated,_=data; self.note_id=nid; self.title.setText(title); self.tags.setText(tags or ""); self.category.setCurrentText(cat); self.course.setCurrentIndex(self.course.findData(cid)); self.mode.setCurrentIndex(1 if mode=="code" else 0); (self.code.setPlainText(content or "") if mode=="code" else self.rich.setHtml(content or ""))
-        elif op in ("save_note","delete_note"):
+        elif op in ("save_note","delete_note","save_task","save_resource","toggle_task","duplicate_note","set_note_state"):
             self.status.setText("Note saved" if op=="save_note" else "Note deleted"); self.db.request.emit("tree",self.search.text()); self.db.request.emit("analytics",None)
+            self.db.request.emit("tasks",None); self.db.request.emit("resources",None)
             if op=="delete_note": self.new_note()
         elif op=="analytics":
             totals,categories,activity=data

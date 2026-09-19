@@ -4,7 +4,9 @@ The UI communicates with this module through DatabaseWorker signals. Keeping
 SQL here makes schema changes and alternate storage backends easier to test.
 """
 
+import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime
 
@@ -50,7 +52,33 @@ def init_db(conn=None):
             created_at TEXT NOT NULL
         )"""
     )
-    for column, definition in (("editor_mode", "TEXT DEFAULT 'rich'"), ("created_at", "TEXT")):
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, title TEXT NOT NULL,
+            description TEXT, due_date TEXT, priority TEXT DEFAULT 'Medium',
+            status TEXT DEFAULT 'Open', created_at TEXT NOT NULL, completed_at TEXT,
+            FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+        )"""
+    )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, title TEXT NOT NULL,
+            url TEXT, description TEXT, tags TEXT, created_at TEXT NOT NULL,
+            FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE
+        )"""
+    )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS note_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, note_id INTEGER NOT NULL,
+            title TEXT NOT NULL, content TEXT, saved_at TEXT NOT NULL,
+            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )"""
+    )
+    for column, definition in (
+        ("editor_mode", "TEXT DEFAULT 'rich'"), ("created_at", "TEXT"),
+        ("is_favorite", "INTEGER DEFAULT 0"), ("is_archived", "INTEGER DEFAULT 0"),
+        ("reminder_at", "TEXT"),
+    ):
         try:
             cur.execute(f"ALTER TABLE notes ADD COLUMN {column} {definition}")
         except sqlite3.OperationalError:
@@ -109,13 +137,15 @@ class DatabaseWorker(QObject):
                 cur.execute("SELECT id,code,name FROM courses ORDER BY code")
                 self.result.emit(operation, cur.fetchall())
             elif operation == "tree":
-                query = (payload or "").lower().strip()
+                query = (payload.get("query", "") if isinstance(payload, dict) else payload or "").lower().strip()
+                include_archived = bool(payload.get("include_archived")) if isinstance(payload, dict) else False
                 cur.execute(
                     """SELECT n.id,n.title,n.category,n.updated_at,c.code FROM notes n
                     LEFT JOIN courses c ON c.id=n.course_id
-                    WHERE ?='' OR lower(n.title||' '||coalesce(n.content,'')||' '||coalesce(n.tags,'')) LIKE ?
+                    WHERE (?='' OR lower(n.title||' '||coalesce(n.content,'')||' '||coalesce(n.tags,'')) LIKE ?)
+                    AND (?=1 OR coalesce(n.is_archived,0)=0)
                     ORDER BY n.updated_at DESC""",
-                    (query, f"%{query}%"),
+                    (query, f"%{query}%", int(include_archived)),
                 )
                 self.result.emit(operation, cur.fetchall())
             elif operation == "note":
@@ -129,6 +159,11 @@ class DatabaseWorker(QObject):
                 note_id, course_id, title, category, content, tags, mode = payload
                 timestamp = now()
                 if note_id:
+                    cur.execute("SELECT title,content FROM notes WHERE id=?", (note_id,))
+                    previous = cur.fetchone()
+                    if previous:
+                        cur.execute("INSERT INTO note_versions(note_id,title,content,saved_at) VALUES(?,?,?,?)",
+                                    (note_id, previous[0], previous[1], timestamp))
                     cur.execute(
                         "UPDATE notes SET course_id=?,title=?,category=?,content=?,tags=?,editor_mode=?,updated_at=? WHERE id=?",
                         (course_id, title, category, content, tags, mode, timestamp, note_id),
@@ -142,6 +177,92 @@ class DatabaseWorker(QObject):
                     note_id = cur.lastrowid
                 self.conn.commit()
                 self.result.emit(operation, (note_id, timestamp))
+            elif operation == "duplicate_note":
+                cur.execute("SELECT course_id,title,category,content,tags,editor_mode FROM notes WHERE id=?", (payload,))
+                source = cur.fetchone()
+                if not source:
+                    raise ValueError("Note not found")
+                timestamp = now()
+                cur.execute("""INSERT INTO notes(course_id,title,category,content,tags,editor_mode,updated_at,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)""",
+                            (source[0], f"{source[1]} (Copy)", source[2], source[3], source[4], source[5], timestamp, timestamp))
+                self.conn.commit()
+                self.result.emit(operation, cur.lastrowid)
+            elif operation == "set_note_state":
+                field = "is_favorite" if payload[0] == "favorite" else "is_archived"
+                cur.execute(f"UPDATE notes SET {field}=? WHERE id=?", (int(payload[1]), payload[2]))
+                self.conn.commit()
+                self.result.emit(operation, None)
+            elif operation == "tasks":
+                cur.execute("""SELECT t.id,t.title,t.description,t.due_date,t.priority,t.status,coalesce(c.code,'')
+                    FROM tasks t LEFT JOIN courses c ON c.id=t.course_id
+                    ORDER BY CASE WHEN t.status='Open' THEN 0 ELSE 1 END, t.due_date""")
+                self.result.emit(operation, cur.fetchall())
+            elif operation == "save_task":
+                task_id, course_id, title, description, due_date, priority, status = payload
+                if task_id:
+                    cur.execute("UPDATE tasks SET course_id=?,title=?,description=?,due_date=?,priority=?,status=? WHERE id=?",
+                                (course_id,title,description,due_date,priority,status,task_id))
+                else:
+                    cur.execute("INSERT INTO tasks(course_id,title,description,due_date,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                                (course_id,title,description,due_date,priority,status,now()))
+                self.conn.commit(); self.result.emit(operation, None)
+            elif operation == "toggle_task":
+                cur.execute("UPDATE tasks SET status=?,completed_at=? WHERE id=?",
+                            ("Completed" if payload[1] else "Open", now() if payload[1] else None, payload[0]))
+                self.conn.commit(); self.result.emit(operation, None)
+            elif operation == "resources":
+                cur.execute("""SELECT r.id,r.title,r.url,r.description,r.tags,coalesce(c.code,'')
+                    FROM resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC""")
+                self.result.emit(operation, cur.fetchall())
+            elif operation == "save_resource":
+                resource_id, course_id, title, url, description, tags = payload
+                if resource_id:
+                    cur.execute("UPDATE resources SET course_id=?,title=?,url=?,description=?,tags=? WHERE id=?",
+                                (course_id,title,url,description,tags,resource_id))
+                else:
+                    cur.execute("INSERT INTO resources(course_id,title,url,description,tags,created_at) VALUES(?,?,?,?,?,?)",
+                                (course_id,title,url,description,tags,now()))
+                self.conn.commit(); self.result.emit(operation, None)
+            elif operation == "versions":
+                cur.execute("SELECT id,title,content,saved_at FROM note_versions WHERE note_id=? ORDER BY saved_at DESC", (payload,))
+                self.result.emit(operation, cur.fetchall())
+            elif operation == "export_data":
+                tables = {}
+                for table in ("courses", "notes", "tasks", "resources", "profile", "chat_messages"):
+                    cur.execute(f"SELECT * FROM {table}")
+                    tables[table] = {"columns": [item[0] for item in cur.description], "rows": cur.fetchall()}
+                with open(payload, "w", encoding="utf-8") as handle:
+                    json.dump(tables, handle, indent=2, default=str)
+                self.result.emit(operation, payload)
+            elif operation == "import_data":
+                with open(payload, "r", encoding="utf-8") as handle:
+                    exported = json.load(handle)
+                for table in ("courses", "notes", "tasks", "resources", "chat_messages"):
+                    spec = exported.get(table)
+                    if not spec:
+                        continue
+                    columns = [column for column in spec["columns"] if column != "id"]
+                    placeholders = ",".join("?" for _ in columns)
+                    for row in spec["rows"]:
+                        values = [row[spec["columns"].index(column)] for column in columns]
+                        cur.execute(f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({placeholders})", values)
+                profile = exported.get("profile")
+                if profile:
+                    columns = profile["columns"]
+                    values = profile["rows"][0]
+                    cur.execute(
+                        f"INSERT OR REPLACE INTO profile ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                        values,
+                    )
+                self.conn.commit()
+                self.result.emit(operation, payload)
+            elif operation == "backup":
+                self.conn.commit()
+                shutil.copy2(DB_FILE, payload)
+                self.result.emit(operation, payload)
+            elif operation == "delete_resource":
+                cur.execute("DELETE FROM resources WHERE id=?", (payload,)); self.conn.commit(); self.result.emit(operation, None)
             elif operation == "delete_note":
                 cur.execute("DELETE FROM notes WHERE id=?", (payload,))
                 self.conn.commit()
