@@ -74,6 +74,14 @@ def init_db(conn=None):
             FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
         )"""
     )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, note_id INTEGER NOT NULL,
+            file_name TEXT NOT NULL, file_path TEXT NOT NULL, mime_type TEXT,
+            file_size INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )"""
+    )
     for column, definition in (
         ("editor_mode", "TEXT DEFAULT 'rich'"), ("created_at", "TEXT"),
         ("is_favorite", "INTEGER DEFAULT 0"), ("is_archived", "INTEGER DEFAULT 0"),
@@ -139,13 +147,15 @@ class DatabaseWorker(QObject):
             elif operation == "tree":
                 query = (payload.get("query", "") if isinstance(payload, dict) else payload or "").lower().strip()
                 include_archived = bool(payload.get("include_archived")) if isinstance(payload, dict) else False
+                course_id = payload.get("course_id") if isinstance(payload, dict) else None
                 cur.execute(
                     """SELECT n.id,n.title,n.category,n.updated_at,c.code FROM notes n
                     LEFT JOIN courses c ON c.id=n.course_id
                     WHERE (?='' OR lower(n.title||' '||coalesce(n.content,'')||' '||coalesce(n.tags,'')) LIKE ?)
                     AND (?=1 OR coalesce(n.is_archived,0)=0)
+                    AND (? IS NULL OR n.course_id=?)
                     ORDER BY n.updated_at DESC""",
-                    (query, f"%{query}%", int(include_archived)),
+                    (query, f"%{query}%", int(include_archived), course_id, course_id),
                 )
                 self.result.emit(operation, cur.fetchall())
             elif operation == "note":
@@ -155,6 +165,26 @@ class DatabaseWorker(QObject):
                     (payload,),
                 )
                 self.result.emit(operation, cur.fetchone())
+            elif operation == "course_overview":
+                cur.execute("""SELECT c.id,c.code,c.name,COUNT(DISTINCT n.id),COUNT(DISTINCT t.id),
+                    COUNT(DISTINCT r.id),COALESCE(SUM(LENGTH(n.content)),0)
+                    FROM courses c LEFT JOIN notes n ON n.course_id=c.id
+                    LEFT JOIN tasks t ON t.course_id=c.id LEFT JOIN resources r ON r.course_id=c.id
+                    WHERE c.id=? GROUP BY c.id,c.code,c.name""", (payload,))
+                self.result.emit(operation, cur.fetchone())
+            elif operation == "attachments":
+                cur.execute("""SELECT id,file_name,file_path,mime_type,file_size,created_at
+                    FROM attachments WHERE note_id=? ORDER BY created_at DESC""", (payload,))
+                self.result.emit(operation, cur.fetchall())
+            elif operation == "save_attachment":
+                cur.execute("""INSERT INTO attachments(note_id,file_name,file_path,mime_type,file_size,created_at)
+                    VALUES(?,?,?,?,?,?)""", (*payload, now()))
+                self.conn.commit()
+                self.result.emit(operation, cur.lastrowid)
+            elif operation == "delete_attachment":
+                cur.execute("DELETE FROM attachments WHERE id=?", (payload,))
+                self.conn.commit()
+                self.result.emit(operation, None)
             elif operation == "save_note":
                 note_id, course_id, title, category, content, tags, mode = payload
                 timestamp = now()
@@ -276,7 +306,17 @@ class DatabaseWorker(QObject):
                     "SELECT substr(updated_at,1,10),COUNT(*) FROM notes WHERE updated_at IS NOT NULL "
                     "GROUP BY substr(updated_at,1,10) ORDER BY substr(updated_at,1,10) DESC LIMIT 7"
                 )
-                self.result.emit(operation, (totals, categories, cur.fetchall()))
+                activity = cur.fetchall()
+                cur.execute("SELECT COUNT(*) FROM tasks WHERE status='Open'")
+                open_tasks = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM tasks WHERE status='Completed'")
+                completed_tasks = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM resources")
+                resources = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM notes WHERE COALESCE(is_favorite,0)=1")
+                favorites = cur.fetchone()[0]
+                self.result.emit(operation, (totals, categories, activity, open_tasks,
+                                             completed_tasks, resources, favorites))
             elif operation == "chat_history":
                 cur.execute("SELECT role,content,created_at FROM chat_messages ORDER BY id")
                 self.result.emit(operation, cur.fetchall())
