@@ -10,6 +10,118 @@ from PyQt6.QtWidgets import (
 from ollama_client import OllamaClient
 
 
+class QuickAddDialog(QDialog):
+    """Reference-inspired modal for quickly creating workspace content."""
+
+    note_created = pyqtSignal(object)
+
+    def __init__(self, courses, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quick Add")
+        self.resize(820, 620)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+
+        header = QHBoxLayout()
+        title = QLabel("Quick Add")
+        title.setObjectName("DialogTitle")
+        header.addWidget(title)
+        header.addStretch()
+        close = QPushButton("×")
+        close.setObjectName("IconButton")
+        close.clicked.connect(self.reject)
+        header.addWidget(close)
+        root.addLayout(header)
+
+        self.mode = QComboBox()
+        self.mode.addItems(["New Note", "New Task", "New Resource"])
+        self.mode.currentIndexChanged.connect(self.update_mode)
+        self.mode.setObjectName("SegmentedControl")
+        root.addWidget(self.mode)
+
+        body = QHBoxLayout()
+        form_frame = QGroupBox("Create content")
+        form = QFormLayout(form_frame)
+        self.title = QLineEdit()
+        self.title.setPlaceholderText("Give this item a clear title")
+        self.course = QComboBox()
+        for course_id, code, name in courses:
+            self.course.addItem(f"[{code}] {name}", course_id)
+        self.tags = QLineEdit()
+        self.tags.setPlaceholderText("lecture, exam, project")
+        self.category = QComboBox()
+        self.category.addItems(["Lecture Note", "Assignment / Lab", "Exam Prep", "Reference Material", "Project Draft"])
+        self.content = QTextEdit()
+        self.content.setPlaceholderText("Add a short content snippet...")
+        self.content.setMinimumHeight(180)
+        form.addRow("Title", self.title)
+        form.addRow("Course", self.course)
+        form.addRow("Category", self.category)
+        form.addRow("Tags", self.tags)
+        form.addRow("Content", self.content)
+        body.addWidget(form_frame, 3)
+
+        preview_frame = QGroupBox("Quick preview")
+        preview = QVBoxLayout(preview_frame)
+        self.preview_title = QLabel("Untitled note")
+        self.preview_title.setObjectName("PreviewTitle")
+        self.preview_course = QLabel("Choose a course")
+        self.preview_course.setObjectName("PreviewMeta")
+        self.preview_content = QLabel("Your content snippet will appear here.")
+        self.preview_content.setWordWrap(True)
+        self.preview_content.setObjectName("PreviewContent")
+        preview.addWidget(self.preview_title)
+        preview.addWidget(self.preview_course)
+        preview.addWidget(self.preview_content)
+        preview.addStretch()
+        body.addWidget(preview_frame, 2)
+        root.addLayout(body, 1)
+
+        self.title.textChanged.connect(self.update_preview)
+        self.course.currentTextChanged.connect(self.update_preview)
+        self.content.textChanged.connect(self.update_preview)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save note")
+        save.setObjectName("PrimaryButton")
+        save.clicked.connect(self.submit)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        root.addLayout(actions)
+        self.update_mode()
+
+    def update_preview(self):
+        self.preview_title.setText(self.title.text().strip() or "Untitled note")
+        self.preview_course.setText(self.course.currentText() or "Choose a course")
+        content = self.content.toPlainText().strip()
+        self.preview_content.setText(content[:180] if content else "Your content snippet will appear here.")
+
+    def update_mode(self):
+        enabled = self.mode.currentIndex() == 0
+        for widget in (self.course, self.category, self.tags, self.content):
+            widget.setEnabled(enabled)
+        self.findChild(QPushButton, "PrimaryButton").setText("Save note" if enabled else "Coming soon")
+
+    def submit(self):
+        if self.mode.currentIndex() != 0:
+            QMessageBox.information(self, "Coming soon", "Tasks and resources are planned for a future persistence update.")
+            return
+        if not self.title.text().strip() or self.course.currentData() is None:
+            QMessageBox.warning(self, "Validation", "Choose a title and course.")
+            return
+        self.note_created.emit({
+            "course_id": self.course.currentData(),
+            "title": self.title.text().strip(),
+            "category": self.category.currentText(),
+            "tags": self.tags.text().strip(),
+            "content": self.content.toPlainText().strip(),
+        })
+        self.accept()
+
+
 class OnboardingDialog(QDialog):
     completed = pyqtSignal(object)
 

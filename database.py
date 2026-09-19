@@ -105,7 +105,7 @@ class DatabaseWorker(QObject):
                 )
                 self.conn.commit()
                 self.result.emit(operation, None)
-            elif operation == "courses":
+            elif operation in ("courses", "courses_for_quick_add"):
                 cur.execute("SELECT id,code,name FROM courses ORDER BY code")
                 self.result.emit(operation, cur.fetchall())
             elif operation == "tree":

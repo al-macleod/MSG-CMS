@@ -8,6 +8,9 @@ A local-first academic workspace for organizing notes, understanding usage patte
 - First-run profile onboarding and AI copilot configuration
 - Dedicated copilot screen plus a chat popup available from every screen
 - Optional Ollama integration with configurable URL, model, system prompt, persona, and memory
+- Dashboard-first navigation inspired by the MSGGroup academic CMS concept
+- Quick Add modal with live note preview and course assignment
+- Reusable card, metric, pill, and page-header UI primitives
 - Keyboard shortcuts: Ctrl+S to save and Ctrl+N to create a new note
 
 Profile and conversation data stay in the local SQLite database. Mental-health context is optional.
@@ -32,6 +35,7 @@ remain fully usable and the chat screen reports the connection error.
 - `database.py` owns SQLite schema initialization and background persistence operations.
 - `ollama_client.py` owns Ollama HTTP transport, prompt construction, and async lifecycle.
 - `dialogs.py` owns first-run profile and AI configuration dialogs.
+- `ui_components.py` owns shared dashboard presentation primitives.
 
 This separation keeps provider-specific AI changes out of the application shell and makes it
 possible to add another model provider without rewriting note management or onboarding.
